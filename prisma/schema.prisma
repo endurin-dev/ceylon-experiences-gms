@@ -1,0 +1,335 @@
+// Ceylon Experiences - Guest Management System
+// Prisma schema - covers Phase 1-5 data model in full so later phases
+// only need UI/route work, not schema churn.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ---------------------------------------------------------------------------
+// Auth / Users / RBAC
+// ---------------------------------------------------------------------------
+
+enum UserStatus {
+  ACTIVE
+  INACTIVE
+}
+
+model User {
+  id            String    @id @default(cuid())
+  name          String
+  username      String    @unique
+  email         String    @unique
+  passwordHash  String
+  status        UserStatus @default(ACTIVE)
+  roleId        String
+  role          Role      @relation(fields: [roleId], references: [id])
+  lastLoginAt   DateTime?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  imports       ExcelImport[]
+  auditLogs     AuditLog[]
+  savedMappings SavedColumnMapping[]
+
+  @@index([roleId])
+}
+
+model Role {
+  id          String       @id @default(cuid())
+  name        String       @unique // SUPER_ADMIN | ADMIN | DATA_ENTRY | custom
+  description String?
+  isSystem    Boolean      @default(false) // seeded roles cannot be deleted
+  createdAt   DateTime     @default(now())
+  updatedAt   DateTime     @updatedAt
+
+  users       User[]
+  permissions Permission[]
+}
+
+enum ModuleName {
+  GUESTS
+  HOTELS
+  BOOKINGS
+  TOURS
+  TRANSFERS
+  GUIDES
+  USERS
+  ROLES
+  IMPORTS
+  SETTINGS
+  AUDIT_LOG
+}
+
+model Permission {
+  id       String     @id @default(cuid())
+  roleId   String
+  role     Role       @relation(fields: [roleId], references: [id], onDelete: Cascade)
+  module   ModuleName
+  canView   Boolean   @default(false)
+  canCreate Boolean   @default(false)
+  canEdit   Boolean   @default(false)
+  canDelete Boolean   @default(false)
+  canImport Boolean   @default(false)
+  canExport Boolean   @default(false)
+
+  @@unique([roleId, module])
+}
+
+// ---------------------------------------------------------------------------
+// Core tourism entities
+// ---------------------------------------------------------------------------
+
+model Guest {
+  id               String    @id @default(cuid())
+  fullName         String
+  firstName        String?
+  lastName         String?
+  passportNumber   String?   @unique
+  nationality      String?
+  dateOfBirth      DateTime?
+  gender           String?
+  phoneNumber      String?
+  email            String?
+  country          String?
+  arrivalDate      DateTime?
+  departureDate    DateTime?
+  notes            String?
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+
+  phoneNormalized  String?   @unique   // NEW — digits-only version of phoneNumber, used as the login key
+  passwordHash     String?             // NEW — set the first time a guest completes the QR flow
+
+  bookings  Booking[]
+  tours     Tour[]
+  transfers Transfer[]
+
+  @@index([passportNumber])
+  @@index([nationality])
+  @@index([phoneNormalized])          // NEW
+}
+
+model Hotel {
+  id            String   @id @default(cuid())
+  name          String
+  address       String?
+  city          String?
+  country       String?
+  contactPerson String?
+  phoneNumber   String?
+  email         String?
+  numberOfRooms Int?
+  status        String?  @default("ACTIVE")
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  bookings Booking[]
+
+  @@index([city, country])
+}
+
+enum BookingStatus {
+  PENDING
+  CONFIRMED
+  CANCELLED
+  COMPLETED
+}
+
+model Booking {
+  id               String        @id @default(cuid())
+  bookingReference String        @unique
+  guestId          String
+  guest            Guest         @relation(fields: [guestId], references: [id])
+  hotelId          String?
+  hotel            Hotel?        @relation(fields: [hotelId], references: [id])
+  checkInDate      DateTime?
+  checkOutDate     DateTime?
+  numberOfGuests   Int?
+  numberOfRooms    Int?
+  status           BookingStatus @default(PENDING)
+  notes            String?
+  createdAt        DateTime      @default(now())
+  updatedAt        DateTime      @updatedAt
+
+  agent            String?
+  agentTourNo      String?
+  samoRef          String?
+  resNo            String?
+  clientsNameRaw   String?
+  paxAdults        Int?
+  paxChildren      Int?
+  paxInfants       Int?
+  arrivalFlight    String?
+  departureFlight  String?
+  pickupTime       String?
+  bookingOwner     String?
+  mealPlan         String?
+  confirmation     String?
+  guideName        String?       // kept as raw imported value
+
+  guideId          String?       // NEW — proper FK to Guide
+  guide            Guide?        @relation(fields: [guideId], references: [id])  // NEW
+
+  @@index([guestId])
+  @@index([hotelId])
+  @@index([status])
+  @@index([samoRef])
+  @@index([resNo])
+  @@index([guideId])            // NEW
+}
+
+model Guide {
+  id             String   @id @default(cuid())
+  fullName       String
+  licenseNumber  String?  @unique
+  phoneNumber    String?
+  email          String?
+  languages      String?
+  specialization String?
+  status         String?  @default("ACTIVE")
+  notes          String?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  username       String?  @unique   // NEW — login credential
+  passwordHash   String?            // NEW — login credential
+  lastLoginAt    DateTime?          // NEW
+
+  bookings       Booking[]
+
+  @@index([licenseNumber])
+  @@index([username])              // NEW
+}
+
+enum ActivityStatus {
+  PLANNED
+  IN_PROGRESS
+  COMPLETED
+  CANCELLED
+}
+
+model Tour {
+  id                  String         @id @default(cuid())
+  tourName            String
+  guestId             String
+  guest               Guest          @relation(fields: [guestId], references: [id])
+  tourDate            DateTime?
+  pickupLocation      String?
+  destination         String?
+  numberOfParticipants Int?
+  status              ActivityStatus @default(PLANNED)
+  notes               String?
+  createdAt           DateTime       @default(now())
+  updatedAt           DateTime       @updatedAt
+
+  @@index([guestId])
+}
+
+model Transfer {
+  id               String         @id @default(cuid())
+  guestId          String
+  guest            Guest          @relation(fields: [guestId], references: [id])
+  pickupLocation   String?
+  dropoffLocation  String?
+  pickupDateTime   DateTime?
+  vehicleType      String?
+  driver           String?
+  status           ActivityStatus @default(PLANNED)
+  notes            String?
+  createdAt        DateTime       @default(now())
+  updatedAt        DateTime       @updatedAt
+
+  @@index([guestId])
+}
+
+// ---------------------------------------------------------------------------
+// Excel import pipeline
+// ---------------------------------------------------------------------------
+
+enum ImportStatus {
+  PENDING
+  PROCESSING
+  COMPLETED
+  COMPLETED_WITH_ERRORS
+  FAILED
+}
+
+enum ImportDestination {
+  GUESTS
+  HOTELS
+  BOOKINGS
+  TOURS
+  TRANSFERS
+}
+
+model ExcelImport {
+  id               String            @id @default(cuid())
+  fileName         String
+  destinationTable ImportDestination
+  worksheetName    String
+  uploadedById     String
+  uploadedBy       User              @relation(fields: [uploadedById], references: [id])
+  totalRows        Int               @default(0)
+  successRows      Int               @default(0)
+  failedRows       Int               @default(0)
+  duplicateRows    Int               @default(0)
+  status           ImportStatus      @default(PENDING)
+  createdAt        DateTime          @default(now())
+  updatedAt        DateTime          @updatedAt
+
+  errors ImportError[]
+
+  @@index([uploadedById])
+}
+
+model ImportError {
+  id            String      @id @default(cuid())
+  importId      String
+  import        ExcelImport @relation(fields: [importId], references: [id], onDelete: Cascade)
+  rowNumber     Int
+  columnName    String?
+  errorMessage  String
+  rawRowData    Json?
+  createdAt     DateTime    @default(now())
+
+  @@index([importId])
+}
+
+model SavedColumnMapping {
+  id          String   @id @default(cuid())
+  name        String   // e.g. "Kazakhstan Winter Guest Import"
+  destination ImportDestination
+  mapping     Json     // { excelColumn: dbField }
+  createdById String
+  createdBy   User     @relation(fields: [createdById], references: [id])
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([createdById])
+}
+
+// ---------------------------------------------------------------------------
+// Audit log
+// ---------------------------------------------------------------------------
+
+model AuditLog {
+  id        String   @id @default(cuid())
+  userId    String?
+  user      User?    @relation(fields: [userId], references: [id])
+  action    String   // LOGIN, LOGOUT, CREATE, UPDATE, DELETE, IMPORT, PASSWORD_CHANGE ...
+  module    String?
+  recordId  String?
+  details   Json?
+  createdAt DateTime @default(now())
+
+  @@index([userId])
+  @@index([module])
+  @@index([createdAt])
+}
+
