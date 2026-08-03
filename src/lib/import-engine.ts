@@ -161,8 +161,8 @@ async function importBookings(rows: MappedRow[], duplicateStrategy: DuplicateStr
       const paxAdults = toInt(v.paxAdults);
       const paxChildren = toInt(v.paxChildren);
       const paxInfants = toInt(v.paxInfants);
-      const numberOfGuests = [paxAdults, paxChildren, paxInfants].reduce(
-        (sum, n) => (n ? sum + n : sum),
+      const numberOfGuests = [paxAdults, paxChildren, paxInfants].reduce<number>(
+        (sum, n) => (typeof n === "number" && n > 0 ? sum + n : sum),
         0
       ) || undefined;
 

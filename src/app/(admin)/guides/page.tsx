@@ -136,7 +136,7 @@ function CredentialsModal({
         {success ? (
           <div className="space-y-4">
             <div className="rounded-lg border border-green-200 bg-green-50 px-4 py-3 text-sm text-green-700 dark:border-green-900 dark:bg-green-900/20 dark:text-green-300">
-              Credentials saved. Share these with {guide.fullName} — the password won't be shown again.
+              Credentials saved. Share these with {guide.fullName} — the password won&apos;t be shown again.
             </div>
             <div className="space-y-2 rounded-lg border border-neutral-200 bg-neutral-50 p-3 text-sm dark:border-neutral-800 dark:bg-neutral-900">
               <div className="flex justify-between">
