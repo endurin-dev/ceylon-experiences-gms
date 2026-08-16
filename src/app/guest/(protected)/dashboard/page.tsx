@@ -206,7 +206,7 @@ function BottomNav() {
     { href: "/guest/dashboard", label: "Home", icon: Home },
     { href: "/guest/excursions", label: "Excursions", icon: Compass },
     { href: "/guest/services", label: "Services", icon: ConciergeBell },
-    { href: "/guest/support", label: "Support", icon: LifeBuoy },
+    { href: "/guest/feedback", label: "Feedback", icon: LifeBuoy },
   ];
 
   return (
