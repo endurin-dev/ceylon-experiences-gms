@@ -122,7 +122,6 @@ export default async function AdvancedBookingSearchPage({ searchParams }: { sear
       { confirmation: { contains: q, mode: "insensitive" } },
       { guideName: { contains: q, mode: "insensitive" } },
       { agent: { contains: q, mode: "insensitive" } },
-      { hotelCity: { contains: q, mode: "insensitive" } },
       { guest: { is: { fullName: { contains: q, mode: "insensitive" } } } },
       { hotel: { is: { name: { contains: q, mode: "insensitive" } } } },
     ] } : {}),
