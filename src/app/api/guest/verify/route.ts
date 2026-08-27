@@ -4,7 +4,7 @@ import { signGuestSession, normalizePhone, GUEST_COOKIE_NAME, GUEST_COOKIE_MAX_A
 
 /**
  * POST /api/guest/verify
- * Body: { bookingId: string, whatsapp: string }
+ * Body: { bookingId: string, whatsapp: string, email?: string }
  *
  * No identity check against existing data — this is a data-capture step,
  * not authentication. Many older records were imported without a phone
@@ -16,6 +16,7 @@ export async function POST(req: NextRequest) {
   const body = await req.json().catch(() => null);
   const bookingId = typeof body?.bookingId === "string" ? body.bookingId : "";
   const whatsapp = typeof body?.whatsapp === "string" ? body.whatsapp.trim() : "";
+  const email = typeof body?.email === "string" ? body.email.trim() : "";
 
   if (!bookingId) {
     return NextResponse.json({ error: "Missing booking reference" }, { status: 400 });
@@ -23,6 +24,10 @@ export async function POST(req: NextRequest) {
 
   if (normalizePhone(whatsapp).length < 7) {
     return NextResponse.json({ error: "Enter a valid WhatsApp number" }, { status: 400 });
+  }
+
+  if (email && !/^\S+@\S+\.\S+$/.test(email)) {
+    return NextResponse.json({ error: "Enter a valid email address" }, { status: 400 });
   }
 
   const booking = await prisma.booking.findUnique({
@@ -34,12 +39,14 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "Booking not found" }, { status: 404 });
   }
 
-  // Only fill in the number if it's missing — don't overwrite an existing
-  // one just because a guest typed something into this form.
-  if (!booking.guest.phoneNumber) {
+  // Only fill blank contact fields; don't overwrite existing guest data.
+  if (!booking.guest.phoneNumber || (email && !booking.guest.email)) {
     await prisma.guest.update({
       where: { id: booking.guest.id },
-      data: { phoneNumber: whatsapp },
+      data: {
+        ...(booking.guest.phoneNumber ? {} : { phoneNumber: whatsapp }),
+        ...(email && !booking.guest.email ? { email } : {}),
+      },
     });
   }
 

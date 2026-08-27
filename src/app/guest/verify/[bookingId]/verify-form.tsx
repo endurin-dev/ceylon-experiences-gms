@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import { useRouter } from "next/navigation";
-import { Loader2, MessageCircle, Hotel, CalendarRange, Ticket } from "lucide-react";
+import { Loader2, MessageCircle, Hotel, CalendarRange, Ticket, Mail } from "lucide-react";
 
 interface BookingSummary {
   bookingReference: string;
@@ -21,6 +21,7 @@ export default function GuestVerifyForm({
 }) {
   const router = useRouter();
   const [whatsapp, setWhatsapp] = useState("");
+  const [email, setEmail] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -36,7 +37,7 @@ export default function GuestVerifyForm({
       const res = await fetch("/api/guest/verify", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ bookingId, whatsapp }),
+        body: JSON.stringify({ bookingId, whatsapp, email }),
       });
       const json = await res.json();
       if (!res.ok) throw new Error(json.error ?? "Verification failed");
@@ -105,6 +106,24 @@ export default function GuestVerifyForm({
                 onChange={(e) => setWhatsapp(e.target.value)}
                 placeholder="+94 77 123 4567"
                 autoComplete="tel"
+                className="w-full rounded-xl border border-neutral-300 py-3 pl-10 pr-4 text-base outline-none focus:border-teal-500 focus:ring-1 focus:ring-teal-500 dark:border-neutral-700 dark:bg-neutral-800 dark:text-neutral-100"
+              />
+            </div>
+          </div>
+
+          <div className="space-y-1.5">
+            <label className="text-sm font-medium text-neutral-700 dark:text-neutral-300">
+              Your email address
+            </label>
+            <p className="text-xs text-neutral-400">For booking updates and important trip information.</p>
+            <div className="relative">
+              <Mail size={16} className="pointer-events-none absolute left-3.5 top-1/2 -translate-y-1/2 text-teal-500" />
+              <input
+                type="email"
+                value={email}
+                onChange={(e) => setEmail(e.target.value)}
+                placeholder="you@example.com"
+                autoComplete="email"
                 className="w-full rounded-xl border border-neutral-300 py-3 pl-10 pr-4 text-base outline-none focus:border-teal-500 focus:ring-1 focus:ring-teal-500 dark:border-neutral-700 dark:bg-neutral-800 dark:text-neutral-100"
               />
             </div>

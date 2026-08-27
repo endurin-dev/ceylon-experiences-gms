@@ -36,6 +36,8 @@ model User {
   imports       ExcelImport[]
   auditLogs     AuditLog[]
   savedMappings SavedColumnMapping[]
+  supportMessages SupportMessage[]
+  notifications Notification[]
 
   @@index([roleId])
 }
@@ -109,10 +111,69 @@ model Guest {
   bookings  Booking[]
   tours     Tour[]
   transfers Transfer[]
+  supportThread SupportThread?
+  supportMessages SupportMessage[]
+  notifications Notification[]
 
   @@index([passportNumber])
   @@index([nationality])
   @@index([phoneNormalized])          // NEW
+}
+
+enum SupportThreadStatus {
+  OPEN
+  CLOSED
+}
+
+enum SupportMessageSender {
+  GUEST
+  ADMIN
+}
+
+model SupportThread {
+  id        String             @id @default(cuid())
+  guestId   String             @unique
+  guest     Guest              @relation(fields: [guestId], references: [id], onDelete: Cascade)
+  status    SupportThreadStatus @default(OPEN)
+  createdAt DateTime           @default(now())
+  updatedAt DateTime           @updatedAt
+
+  messages SupportMessage[]
+
+  @@index([status, updatedAt])
+}
+
+model SupportMessage {
+  id            String               @id @default(cuid())
+  threadId      String
+  thread        SupportThread        @relation(fields: [threadId], references: [id], onDelete: Cascade)
+  sender        SupportMessageSender
+  body          String
+  guestId       String?
+  guest         Guest?               @relation(fields: [guestId], references: [id], onDelete: SetNull)
+  adminId       String?
+  admin         User?                @relation(fields: [adminId], references: [id], onDelete: SetNull)
+  createdAt     DateTime             @default(now())
+
+  @@index([threadId, createdAt])
+  @@index([guestId])
+  @@index([adminId])
+}
+
+model Notification {
+  id        String   @id @default(cuid())
+  guestId   String
+  guest     Guest    @relation(fields: [guestId], references: [id], onDelete: Cascade)
+  senderId  String
+  sender    User     @relation(fields: [senderId], references: [id], onDelete: Restrict)
+  title     String
+  body      String
+  readAt    DateTime?
+  createdAt DateTime @default(now())
+
+  @@index([guestId, createdAt])
+  @@index([guestId, readAt])
+  @@index([senderId])
 }
 
 model Hotel {
@@ -157,21 +218,29 @@ model Booking {
   createdAt        DateTime      @default(now())
   updatedAt        DateTime      @updatedAt
 
+  tourType         String?       // NEW — e.g. "Round Tour", "Visa Only", "Transfer Only"
   agent            String?
   agentTourNo      String?
   samoRef          String?
   resNo            String?
   clientsNameRaw   String?
+  transferType     String?       // NEW — e.g. "Group Transfer", "Individual Transfer"
   paxAdults        Int?
   paxChildren      Int?
   paxInfants       Int?
   arrivalFlight    String?
+  arrivalAirport   String?       // NEW
   departureFlight  String?
+  departureAirport String?       // NEW
   pickupTime       String?
   bookingOwner     String?
+  hotelCity        String?       // NEW — separate from hotel.city on the linked Hotel record
   mealPlan         String?
+  appliedBy        String?       // NEW
   confirmation     String?
   guideName        String?       // kept as raw imported value
+  importId String?
+  import   ExcelImport? @relation(fields: [importId], references: [id])
 
   guideId          String?       // NEW — proper FK to Guide
   guide            Guide?        @relation(fields: [guideId], references: [id])  // NEW
@@ -182,7 +251,9 @@ model Booking {
   @@index([samoRef])
   @@index([resNo])
   @@index([guideId])            // NEW
+  @@index([importId]) 
 }
+
 
 model Guide {
   id             String   @id @default(cuid())
@@ -284,6 +355,7 @@ model ExcelImport {
   updatedAt        DateTime          @updatedAt
 
   errors ImportError[]
+  bookings Booking[]
 
   @@index([uploadedById])
 }

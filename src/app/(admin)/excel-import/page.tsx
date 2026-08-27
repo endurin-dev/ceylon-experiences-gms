@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import * as XLSX from "xlsx";
 import {
   UploadCloud,
@@ -38,6 +38,16 @@ interface ImportResult {
   errors: { rowNumber: number; columnName?: string; errorMessage: string }[];
 }
 
+// NEW — shape returned by /api/imports/check-duplicates
+interface DuplicatePreview {
+  supported: boolean;
+  totalRows: number;
+  newCount: number;
+  duplicateCount: number;
+  unstableRefCount: number;
+  unstableRows: number[];
+}
+
 const IGNORE = "__ignore__";
 
 export default function ExcelImportPage() {
@@ -60,6 +70,10 @@ export default function ExcelImportPage() {
   const [result, setResult] = useState<ImportResult | null>(null);
   const [error, setError] = useState<string | null>(null);
 
+  // NEW — duplicate dry-run preview state
+  const [dupPreview, setDupPreview] = useState<DuplicatePreview | null>(null);
+  const [checkingDup, setCheckingDup] = useState(false);
+
   const fields = IMPORT_FIELDS[destination];
 
   function loadSheet(wb: XLSX.WorkBook, sheetName: string) {
@@ -72,7 +86,6 @@ export default function ExcelImportPage() {
     setParsed({ headers, rows });
     setSelectedSheet(sheetName);
 
-    // Auto-suggest mapping for the current destination.
     const initialMapping: Record<string, string> = {};
     for (const h of headers) {
       initialMapping[h] = suggestFieldForHeader(h, destination) ?? IGNORE;
@@ -117,6 +130,45 @@ export default function ExcelImportPage() {
   const requiredFieldsMapped = fields
     .filter((f) => f.required)
     .every((f) => Object.values(mapping).includes(f.key));
+
+  // NEW — run the dry-run duplicate check whenever we're on the configure
+  // step and the destination/mapped rows change. Debounced lightly so it
+  // doesn't fire on every keystroke-driven mapping tweak.
+  useEffect(() => {
+    if (step !== "configure" || destination !== "BOOKINGS" || mappedRows.length === 0 || !requiredFieldsMapped) {
+      setDupPreview(null);
+      return;
+    }
+
+    let cancelled = false;
+    const t = setTimeout(async () => {
+      setCheckingDup(true);
+      try {
+        const res = await fetch("/api/imports/check-duplicates", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ destination, rows: mappedRows }),
+        });
+        if (!res.ok) {
+          if (!cancelled) setDupPreview(null);
+          return;
+        }
+        const json = await res.json();
+        if (!cancelled) setDupPreview(json.supported ? json : null);
+      } catch {
+        if (!cancelled) setDupPreview(null);
+      } finally {
+        if (!cancelled) setCheckingDup(false);
+      }
+    }, 400);
+
+    return () => {
+      cancelled = true;
+      clearTimeout(t);
+    };
+    // mappedRows is derived from parsed+mapping, safe as a dep here
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [step, destination, mappedRows, requiredFieldsMapped]);
 
   async function handleSaveMapping() {
     if (!mappingName.trim()) return;
@@ -172,6 +224,7 @@ export default function ExcelImportPage() {
     setMapping({});
     setResult(null);
     setError(null);
+    setDupPreview(null);
   }
 
   return (
@@ -343,7 +396,40 @@ export default function ExcelImportPage() {
           </div>
 
           <div className="rounded-xl border border-neutral-200 bg-white p-4 dark:border-neutral-800 dark:bg-neutral-950">
-            <h2 className="mb-3 text-sm font-semibold text-neutral-900 dark:text-neutral-100">Duplicate handling</h2>
+            <h2 className="mb-1 text-sm font-semibold text-neutral-900 dark:text-neutral-100">Duplicate handling</h2>
+            <p className="mb-3 text-xs text-neutral-500">
+              Re-uploading the same file? <strong>&ldquo;Skip duplicate records&rdquo;</strong> is the safe
+              default — rows already in the system are left untouched, and only new rows are added.
+            </p>
+
+            {destination === "BOOKINGS" && (
+              <div className="mb-3 rounded-lg bg-neutral-50 px-3 py-2 text-xs dark:bg-neutral-900">
+                {checkingDup && (
+                  <span className="flex items-center gap-1.5 text-neutral-400">
+                    <Loader2 size={12} className="animate-spin" /> Checking against existing bookings…
+                  </span>
+                )}
+                {!checkingDup && dupPreview && (
+                  <span className="text-neutral-600 dark:text-neutral-400">
+                    Of {dupPreview.totalRows} mapped rows:{" "}
+                    <span className="font-medium text-brand-600">{dupPreview.newCount} new</span>,{" "}
+                    <span className="font-medium text-amber-600">{dupPreview.duplicateCount} already exist</span>
+                    {dupPreview.unstableRefCount > 0 && (
+                      <span className="text-red-500">
+                        {" "}
+                        · {dupPreview.unstableRefCount} row{dupPreview.unstableRefCount === 1 ? "" : "s"} have no
+                        reference number and can&apos;t be reliably deduplicated on re-upload
+                      </span>
+                    )}
+                    .
+                  </span>
+                )}
+                {!checkingDup && !dupPreview && requiredFieldsMapped && (
+                  <span className="text-neutral-400">Duplicate check unavailable for this destination.</span>
+                )}
+              </div>
+            )}
+
             <div className="flex flex-wrap gap-3">
               {(
                 [

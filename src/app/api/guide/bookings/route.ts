@@ -7,10 +7,7 @@ export async function GET() {
   if (!guide) return NextResponse.json({ error: "Unauthenticated" }, { status: 401 });
 
   const bookings = await prisma.booking.findMany({
-    where: {
-      guideId: guide.id,
-      status: "PENDING",
-    },
+    where: { guideId: guide.id },
     include: { guest: true, hotel: true },
     orderBy: [{ checkInDate: "asc" }],
     take: 50,

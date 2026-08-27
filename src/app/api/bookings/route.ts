@@ -12,9 +12,12 @@ export async function GET(req: NextRequest) {
   const pageSize = Math.min(100, Math.max(1, parseInt(sp.get("pageSize") ?? "25", 10) || 25));
   const q = sp.get("q")?.trim();
   const status = sp.get("status");
+  const importId = sp.get("importId")?.trim();
 
   const where: Prisma.BookingWhereInput = {
     ...(status && status !== "ALL" ? { status: status as any } : {}),
+    // NEW — scope the whole list down to one Excel import when a file was clicked.
+    ...(importId ? { importId } : {}),
     ...(q
       ? {
           OR: [

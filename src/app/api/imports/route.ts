@@ -70,7 +70,8 @@ export async function POST(req: NextRequest) {
     result = await runImport(
       destination as ImportDestination,
       rows as MappedRow[],
-      duplicateStrategy as DuplicateStrategy
+      duplicateStrategy as DuplicateStrategy,
+      excelImport.id
     );
   } catch (err) {
     console.error("[imports] runImport threw:", err);

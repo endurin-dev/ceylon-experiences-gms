@@ -4,7 +4,7 @@ import { useEffect, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 import Link from "next/link";
 import { QRCodeSVG } from "qrcode.react";
-import { ArrowLeft, Loader2, Printer, Copy, Check } from "lucide-react";
+import { ArrowLeft, Loader2, Printer, Copy, Check, Pencil } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 interface BookingDetail {
@@ -171,12 +171,20 @@ export default function BookingDetailPage() {
         >
           <ArrowLeft size={16} /> Back to bookings
         </Link>
-        <button
-          onClick={() => window.print()}
-          className="flex items-center gap-2 rounded-lg border border-neutral-300 px-3 py-1.5 text-sm font-medium text-neutral-700 hover:bg-neutral-50 dark:border-neutral-700 dark:text-neutral-300 dark:hover:bg-neutral-900"
-        >
-          <Printer size={14} /> Print
-        </button>
+        <div className="flex items-center gap-2">
+          <Link
+            href={`/bookings/${id}/edit`}
+            className="flex items-center gap-2 rounded-lg bg-brand-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-brand-700"
+          >
+            <Pencil size={14} /> Edit
+          </Link>
+          <button
+            onClick={() => window.print()}
+            className="flex items-center gap-2 rounded-lg border border-neutral-300 px-3 py-1.5 text-sm font-medium text-neutral-700 hover:bg-neutral-50 dark:border-neutral-700 dark:text-neutral-300 dark:hover:bg-neutral-900"
+          >
+            <Printer size={14} /> Print
+          </button>
+        </div>
       </div>
 
       {/* Header + QR */}

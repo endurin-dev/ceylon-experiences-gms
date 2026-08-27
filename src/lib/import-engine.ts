@@ -16,16 +16,36 @@ export interface ImportRunResult {
   failedRows: number;
   duplicateRows: number;
   errors: { rowNumber: number; columnName?: string; errorMessage: string; rawRowData?: unknown }[];
+  // Rows that imported successfully but whose "Guide name" cell didn't match
+  // any existing Guide record. The booking still imports — guideName keeps
+  // the raw text and guideId is left null — this is just a heads-up so
+  // staff can fix typos or create the missing Guide record and re-run with
+  // duplicateStrategy "update".
+  unmatchedGuideNames: { rowNumber: number; guideName: string }[];
+}
+
+// NEW — result shape for the pre-import duplicate preview (dry run, no writes)
+export interface DuplicatePreviewResult {
+  totalRows: number;
+  newCount: number;
+  duplicateCount: number;
+  // Rows with no stable natural key (no explicit reference, samo ref, res
+  // no, or agent tour no) would get an AUTO- generated reference that is
+  // NOT stable across two uploads of the same file. These can never be
+  // reliably detected as duplicates on re-upload, so flag them separately.
+  unstableRefCount: number;
+  unstableRows: number[]; // row numbers, for surfacing in the UI if needed
 }
 
 export async function runImport(
   destination: ImportDestination,
   rows: MappedRow[],
-  duplicateStrategy: DuplicateStrategy
+  duplicateStrategy: DuplicateStrategy,
+  importId: string
 ): Promise<ImportRunResult> {
   switch (destination) {
     case "BOOKINGS":
-      return importBookings(rows, duplicateStrategy);
+      return importBookings(rows, duplicateStrategy, importId);
     case "GUESTS":
       return importGuests(rows, duplicateStrategy);
     case "HOTELS":
@@ -33,11 +53,61 @@ export async function runImport(
     default:
       // TOURS / TRANSFERS follow the same pattern as GUESTS/HOTELS below;
       // add them the same way once you need them.
-      return { successRows: 0, failedRows: rows.length, duplicateRows: 0, errors: rows.map((r) => ({
-        rowNumber: r.rowNumber,
-        errorMessage: `Import for destination "${destination}" is not implemented yet`,
-      })) };
+      return {
+        successRows: 0,
+        failedRows: rows.length,
+        duplicateRows: 0,
+        unmatchedGuideNames: [],
+        errors: rows.map((r) => ({
+          rowNumber: r.rowNumber,
+          errorMessage: `Import for destination "${destination}" is not implemented yet`,
+        })),
+      };
   }
+}
+
+// ---------------------------------------------------------------------------
+// Duplicate preview (dry run — used by the "check-duplicates" API route so
+// the UI can show "X new / Y already exist" before the user commits).
+// Only meaningful for BOOKINGS, since GUESTS/HOTELS dedupe on
+// case-insensitive name matching rather than a single unique column, which
+// doesn't batch the same way. Extend this if you need previews for those too.
+// ---------------------------------------------------------------------------
+
+export async function previewBookingDuplicates(rows: MappedRow[]): Promise<DuplicatePreviewResult> {
+  const refsByRow = rows.map((row) => ({
+    rowNumber: row.rowNumber,
+    reference: buildBookingReference(row.values, row.rowNumber),
+  }));
+
+  const unstableRows = refsByRow.filter((r) => r.reference.startsWith("AUTO-ROW")).map((r) => r.rowNumber);
+
+  // Only check stable references against the DB — an AUTO- reference is
+  // freshly generated every time and will never match an existing row, so
+  // including it would just waste a query and always report "new".
+  const stableRefs = refsByRow.filter((r) => !r.reference.startsWith("AUTO-ROW")).map((r) => r.reference);
+
+  let existingRefs = new Set<string>();
+  if (stableRefs.length > 0) {
+    const existing = await prisma.booking.findMany({
+      where: { bookingReference: { in: stableRefs } },
+      select: { bookingReference: true },
+    });
+    existingRefs = new Set(existing.map((b) => b.bookingReference));
+  }
+
+  let duplicateCount = 0;
+  for (const r of refsByRow) {
+    if (existingRefs.has(r.reference)) duplicateCount++;
+  }
+
+  return {
+    totalRows: rows.length,
+    newCount: rows.length - duplicateCount,
+    duplicateCount,
+    unstableRefCount: unstableRows.length,
+    unstableRows,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -97,7 +167,25 @@ async function findOrCreateGuest(fullName: string, extra: { arrivalDate?: Date; 
   });
 }
 
-function buildBookingReference(v: Record<string, unknown>, rowNumber: number): string {
+// Guides are staff-facing portal accounts with logins, unlike hotels/guests,
+// so importing a booking should never silently mint a new Guide just
+// because a name appeared in a spreadsheet cell. This ONLY links to an
+// existing Guide by case-insensitive exact name match; if there's no match
+// it returns null and the caller records it as "unmatched" for review.
+// If you later want fuzzy matching (nicknames, misspellings) or the option
+// to auto-create, add it here explicitly rather than defaulting to create.
+async function findGuideByName(fullName: string) {
+  const clean = fullName.trim();
+  if (!clean) return null;
+  return prisma.guide.findFirst({
+    where: { fullName: { equals: clean, mode: "insensitive" } },
+  });
+}
+
+// CHANGED: exported so the duplicate-preview dry run (above) and the API
+// route can compute the exact same reference a real import would use,
+// without duplicating the rule in two places.
+export function buildBookingReference(v: Record<string, unknown>, rowNumber: number): string {
   const samo = toStr(v.samoRef);
   const res = toStr(v.resNo);
   const agentTour = toStr(v.agentTourNo);
@@ -116,8 +204,18 @@ function buildBookingReference(v: Record<string, unknown>, rowNumber: number): s
 // BOOKINGS (composite: guest + hotel + booking, one Excel row each)
 // ---------------------------------------------------------------------------
 
-async function importBookings(rows: MappedRow[], duplicateStrategy: DuplicateStrategy): Promise<ImportRunResult> {
-  const result: ImportRunResult = { successRows: 0, failedRows: 0, duplicateRows: 0, errors: [] };
+async function importBookings(
+  rows: MappedRow[],
+  duplicateStrategy: DuplicateStrategy,
+  importId: string
+): Promise<ImportRunResult> {
+  const result: ImportRunResult = {
+    successRows: 0,
+    failedRows: 0,
+    duplicateRows: 0,
+    errors: [],
+    unmatchedGuideNames: [],
+  };
 
   for (const row of rows) {
     const v = row.values;
@@ -158,6 +256,12 @@ async function importBookings(rows: MappedRow[], duplicateStrategy: DuplicateStr
       const guest = await findOrCreateGuest(primaryName, { arrivalDate, departureDate });
       const hotel = await findOrCreateHotel(hotelName);
 
+      const guideNameRaw = toStr(v.guideName);
+      const guide = guideNameRaw ? await findGuideByName(guideNameRaw) : null;
+      if (guideNameRaw && !guide) {
+        result.unmatchedGuideNames.push({ rowNumber: row.rowNumber, guideName: guideNameRaw });
+      }
+
       const paxAdults = toInt(v.paxAdults);
       const paxChildren = toInt(v.paxChildren);
       const paxInfants = toInt(v.paxInfants);
@@ -167,6 +271,7 @@ async function importBookings(rows: MappedRow[], duplicateStrategy: DuplicateStr
       ) || undefined;
 
       const data = {
+        importId,
         bookingReference,
         guestId: guest.id,
         hotelId: hotel.id,
@@ -188,7 +293,14 @@ async function importBookings(rows: MappedRow[], duplicateStrategy: DuplicateStr
         bookingOwner: toStr(v.bookingOwner),
         mealPlan: toStr(v.mealPlan),
         confirmation: toStr(v.confirmation),
-        guideName: toStr(v.guideName),
+        guideName: guideNameRaw,
+        guideId: guide?.id,
+        tourType: toStr(v.tourType),
+        transferType: toStr(v.transferType),
+        arrivalAirport: toStr(v.arrivalAirport),
+        departureAirport: toStr(v.departureAirport),
+        hotelCity: toStr(v.hotelCity),
+        appliedBy: toStr(v.appliedBy),
       };
 
       if (existing && duplicateStrategy === "update") {
@@ -212,7 +324,13 @@ async function importBookings(rows: MappedRow[], duplicateStrategy: DuplicateStr
 // ---------------------------------------------------------------------------
 
 async function importGuests(rows: MappedRow[], duplicateStrategy: DuplicateStrategy): Promise<ImportRunResult> {
-  const result: ImportRunResult = { successRows: 0, failedRows: 0, duplicateRows: 0, errors: [] };
+  const result: ImportRunResult = {
+    successRows: 0,
+    failedRows: 0,
+    duplicateRows: 0,
+    errors: [],
+    unmatchedGuideNames: [],
+  };
 
   for (const row of rows) {
     const v = row.values;
@@ -267,7 +385,13 @@ async function importGuests(rows: MappedRow[], duplicateStrategy: DuplicateStrat
 // ---------------------------------------------------------------------------
 
 async function importHotels(rows: MappedRow[], duplicateStrategy: DuplicateStrategy): Promise<ImportRunResult> {
-  const result: ImportRunResult = { successRows: 0, failedRows: 0, duplicateRows: 0, errors: [] };
+  const result: ImportRunResult = {
+    successRows: 0,
+    failedRows: 0,
+    duplicateRows: 0,
+    errors: [],
+    unmatchedGuideNames: [],
+  };
 
   for (const row of rows) {
     const v = row.values;

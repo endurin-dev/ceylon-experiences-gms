@@ -1,751 +1,343 @@
-"use client";
-
-import { useEffect, useState, useCallback, useMemo } from "react";
 import Link from "next/link";
-import {
-  Search,
-  ChevronLeft,
-  ChevronRight,
-  ChevronDown,
-  ChevronUp,
-  Loader2,
-  RefreshCw,
-  QrCode,
-  UserCheck,
-  X,
-  SlidersHorizontal,
-  RotateCcw,
-} from "lucide-react";
-import { cn } from "@/lib/utils";
+import { prisma } from "@/lib/prisma";
+import { CheckCircle2, AlertTriangle, XCircle, Loader2, FileSpreadsheet, Search, X, Eye } from "lucide-react";
 
-interface BookingRow {
-  id: string;
-  bookingReference: string;
-  status: string;
-  checkInDate: string | null;
-  checkOutDate: string | null;
-  numberOfGuests: number | null;
-  numberOfRooms: number | null;
-  clientsNameRaw: string | null;
-  agent: string | null;
-  samoRef: string | null;
-  resNo: string | null;
-  arrivalFlight: string | null;
-  departureFlight: string | null;
-  mealPlan: string | null;
-  guideName: string | null;
-  confirmation: string | null;
-  bookingOwner: string | null;
-  guest: { id: string; fullName: string } | null;
-  hotel: { id: string; name: string; city?: string | null } | null;
-  guide: { id: string; fullName: string } | null;
-}
-
-interface BookingsResponse {
-  bookings: BookingRow[];
-  total: number;
-  page: number;
-  pageSize: number;
-  totalPages: number;
-}
-
-interface GuideOption {
-  id: string;
-  fullName: string;
-  specialization: string | null;
-}
-
-const STATUS_OPTIONS = ["ALL", "PENDING", "CONFIRMED", "CANCELLED", "COMPLETED"] as const;
-const MEAL_PLAN_OPTIONS = ["ALL", "RO", "BB", "HB", "FB", "AI"] as const;
-
-const PAGE_SIZE_OPTIONS = [25, 50, 100, 200] as const;
-
-interface Filters {
-  q: string;
-  status: (typeof STATUS_OPTIONS)[number];
-  checkInFrom: string;
-  checkInTo: string;
-  checkOutFrom: string;
-  checkOutTo: string;
-  agent: string;
-  hotel: string;
-  guide: string;
-  mealPlan: (typeof MEAL_PLAN_OPTIONS)[number];
-  minPax: string;
-  maxPax: string;
-  bookingOwner: string;
-}
-
-const EMPTY_FILTERS: Filters = {
-  q: "",
-  status: "ALL",
-  checkInFrom: "",
-  checkInTo: "",
-  checkOutFrom: "",
-  checkOutTo: "",
-  agent: "",
-  hotel: "",
-  guide: "",
-  mealPlan: "ALL",
-  minPax: "",
-  maxPax: "",
-  bookingOwner: "",
+const STATUS_META: Record<string, { icon: typeof CheckCircle2; className: string; label: string }> = {
+  COMPLETED: { icon: CheckCircle2, className: "text-brand-600", label: "Completed" },
+  COMPLETED_WITH_ERRORS: { icon: AlertTriangle, className: "text-amber-600", label: "Completed with errors" },
+  FAILED: { icon: XCircle, className: "text-red-600", label: "Failed" },
+  PENDING: { icon: Loader2, className: "text-neutral-400", label: "Pending" },
+  PROCESSING: { icon: Loader2, className: "text-neutral-400", label: "Processing" },
 };
 
-function formatDate(value: string | null) {
-  if (!value) return "—";
-  const d = new Date(value);
-  if (Number.isNaN(d.getTime())) return "—";
-  return d.toLocaleDateString(undefined, { year: "numeric", month: "short", day: "2-digit" });
+type SearchParams = { [key: string]: string | string[] | undefined };
+
+function getStringParam(params: SearchParams, key: string): string {
+  const value = params[key];
+  return typeof value === "string" ? value.trim() : "";
 }
 
-function StatusBadge({ status }: { status: string }) {
-  const styles: Record<string, string> = {
-    PENDING: "bg-amber-50 text-amber-700 dark:bg-amber-900/30 dark:text-amber-300",
-    CONFIRMED: "bg-brand-50 text-brand-700 dark:bg-brand-900/30 dark:text-brand-300",
-    CANCELLED: "bg-red-50 text-red-700 dark:bg-red-900/30 dark:text-red-300",
-    COMPLETED: "bg-neutral-100 text-neutral-700 dark:bg-neutral-800 dark:text-neutral-300",
-  };
-  return (
-    <span className={cn("rounded-full px-2 py-0.5 text-[10px] font-medium leading-none", styles[status] ?? styles.PENDING)}>
-      {status}
-    </span>
-  );
+// Parses a `YYYY-MM-DD` value from an <input type="date"> as the start of
+// that day in local time. Returns undefined for empty/invalid input, so it
+// can be spread straight into a Prisma date filter.
+function parseDateStart(value: string): Date | undefined {
+  if (!value) return undefined;
+  const date = new Date(`${value}T00:00:00`);
+  return Number.isNaN(date.getTime()) ? undefined : date;
 }
 
-function FilterField({ label, children }: { label: string; children: React.ReactNode }) {
-  return (
-    <label className="flex flex-col gap-1">
-      <span className="text-[11px] font-medium uppercase tracking-wide text-neutral-500 dark:text-neutral-400">
-        {label}
-      </span>
-      {children}
-    </label>
-  );
+// Same as above but anchored to the end of the day, so an inclusive "to"
+// filter still captures bookings dated anywhere on that day.
+function parseDateEnd(value: string): Date | undefined {
+  if (!value) return undefined;
+  const date = new Date(`${value}T23:59:59.999`);
+  return Number.isNaN(date.getTime()) ? undefined : date;
 }
 
-const inputCls =
-  "rounded-lg border border-neutral-300 bg-white px-2.5 py-1.5 text-xs text-neutral-800 outline-none focus:border-brand-500 focus:ring-1 focus:ring-brand-500 dark:border-neutral-700 dark:bg-neutral-900 dark:text-neutral-200";
+export default async function BookingsPage({
+  searchParams,
+}: {
+  searchParams: Promise<SearchParams> | SearchParams;
+}) {
+  const params = await searchParams;
+  const q = getStringParam(params, "q");
 
-export default function BookingsPage() {
-  const [data, setData] = useState<BookingsResponse | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+  const checkInFromRaw = getStringParam(params, "checkInFrom");
+  const checkInToRaw = getStringParam(params, "checkInTo");
+  const checkOutFromRaw = getStringParam(params, "checkOutFrom");
+  const checkOutToRaw = getStringParam(params, "checkOutTo");
 
-  // Draft filters (edited live) vs applied filters (sent to API).
-  // q is applied with a debounce; everything else applies on change or via the Apply button.
-  const [draft, setDraft] = useState<Filters>(EMPTY_FILTERS);
-  const [applied, setApplied] = useState<Filters>(EMPTY_FILTERS);
-  const [filtersOpen, setFiltersOpen] = useState(true);
+  const checkInFrom = parseDateStart(checkInFromRaw);
+  const checkInTo = parseDateEnd(checkInToRaw);
+  const checkOutFrom = parseDateStart(checkOutFromRaw);
+  const checkOutTo = parseDateEnd(checkOutToRaw);
 
-  const [page, setPage] = useState(1);
-  const [pageSize, setPageSize] = useState<(typeof PAGE_SIZE_OPTIONS)[number]>(50);
+  const hasQuery = q.length > 0;
+  const hasDateFilter = Boolean(checkInFrom || checkInTo || checkOutFrom || checkOutTo);
+  const hasActiveFilter = hasQuery || hasDateFilter;
 
-  // Bulk-selection + assign state
-  const [selected, setSelected] = useState<Set<string>>(new Set());
-  const [guides, setGuides] = useState<GuideOption[] | null>(null);
-  const [loadingGuides, setLoadingGuides] = useState(false);
-  const [assignGuideId, setAssignGuideId] = useState("");
-  const [assigning, setAssigning] = useState(false);
-  const [assignError, setAssignError] = useState<string | null>(null);
-  const [assignSuccess, setAssignSuccess] = useState<string | null>(null);
+  const imports = await prisma.excelImport.findMany({
+    where: { destinationTable: "BOOKINGS" },
+    orderBy: { createdAt: "desc" },
+    include: {
+      uploadedBy: true,
+      _count: { select: { bookings: true } },
+    },
+    take: 100,
+  });
 
-  // Debounce free-text search so we don't fire a request per keystroke.
-  useEffect(() => {
-    const t = setTimeout(() => {
-      setApplied((prev) => ({ ...prev, q: draft.q }));
-    }, 350);
-    return () => clearTimeout(t);
-  }, [draft.q]);
+  const totalBookings = imports.reduce((sum, i) => sum + i._count.bookings, 0);
 
-  const activeFilterCount = useMemo(() => {
-    let n = 0;
-    if (applied.status !== "ALL") n++;
-    if (applied.mealPlan !== "ALL") n++;
-    if (applied.checkInFrom) n++;
-    if (applied.checkInTo) n++;
-    if (applied.checkOutFrom) n++;
-    if (applied.checkOutTo) n++;
-    if (applied.agent.trim()) n++;
-    if (applied.hotel.trim()) n++;
-    if (applied.guide.trim()) n++;
-    if (applied.bookingOwner.trim()) n++;
-    if (applied.minPax.trim()) n++;
-    if (applied.maxPax.trim()) n++;
-    return n;
-  }, [applied]);
-
-  const load = useCallback(async () => {
-    setLoading(true);
-    setError(null);
-    try {
-      const params = new URLSearchParams({ page: String(page), pageSize: String(pageSize) });
-      if (applied.q.trim()) params.set("q", applied.q.trim());
-      if (applied.status !== "ALL") params.set("status", applied.status);
-      if (applied.mealPlan !== "ALL") params.set("mealPlan", applied.mealPlan);
-      if (applied.checkInFrom) params.set("checkInFrom", applied.checkInFrom);
-      if (applied.checkInTo) params.set("checkInTo", applied.checkInTo);
-      if (applied.checkOutFrom) params.set("checkOutFrom", applied.checkOutFrom);
-      if (applied.checkOutTo) params.set("checkOutTo", applied.checkOutTo);
-      if (applied.agent.trim()) params.set("agent", applied.agent.trim());
-      if (applied.hotel.trim()) params.set("hotel", applied.hotel.trim());
-      if (applied.guide.trim()) params.set("guide", applied.guide.trim());
-      if (applied.bookingOwner.trim()) params.set("bookingOwner", applied.bookingOwner.trim());
-      if (applied.minPax.trim()) params.set("minPax", applied.minPax.trim());
-      if (applied.maxPax.trim()) params.set("maxPax", applied.maxPax.trim());
-
-      const res = await fetch(`/api/bookings?${params.toString()}`);
-      if (!res.ok) throw new Error("Failed to load bookings");
-      const json = await res.json();
-      setData(json);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to load bookings");
-    } finally {
-      setLoading(false);
-    }
-  }, [page, pageSize, applied]);
-
-  useEffect(() => {
-    load();
-  }, [load]);
-
-  useEffect(() => {
-    setPage(1);
-    setSelected(new Set());
-  }, [applied, pageSize]);
-
-  const loadGuides = useCallback(async () => {
-    setLoadingGuides(true);
-    try {
-      const res = await fetch(`/api/guides?pageSize=100`);
-      if (!res.ok) throw new Error("Failed to load guides");
-      const json = await res.json();
-      setGuides(json.guides);
-    } catch {
-      setGuides([]);
-    } finally {
-      setLoadingGuides(false);
-    }
-  }, []);
-
-  useEffect(() => {
-    if (selected.size > 0 && !guides) loadGuides();
-  }, [selected.size, guides, loadGuides]);
-
-  const allOnPageSelected = useMemo(
-    () => !!data && data.bookings.length > 0 && data.bookings.every((b) => selected.has(b.id)),
-    [data, selected]
-  );
-
-  function toggleRow(id: string) {
-    setSelected((prev) => {
-      const next = new Set(prev);
-      if (next.has(id)) next.delete(id);
-      else next.add(id);
-      return next;
-    });
-    setAssignSuccess(null);
-  }
-
-  function toggleAllOnPage() {
-    if (!data) return;
-    setSelected((prev) => {
-      const next = new Set(prev);
-      if (allOnPageSelected) {
-        data.bookings.forEach((b) => next.delete(b.id));
-      } else {
-        data.bookings.forEach((b) => next.add(b.id));
-      }
-      return next;
-    });
-    setAssignSuccess(null);
-  }
-
-  function clearSelection() {
-    setSelected(new Set());
-    setAssignGuideId("");
-    setAssignError(null);
-    setAssignSuccess(null);
-  }
-
-  function applyFilters() {
-    setApplied(draft);
-  }
-
-  function resetFilters() {
-    setDraft(EMPTY_FILTERS);
-    setApplied(EMPTY_FILTERS);
-  }
-
-  // Fields that should apply immediately (dropdowns/dates), not wait for the Apply button.
-  function updateAndApply<K extends keyof Filters>(key: K, value: Filters[K]) {
-    setDraft((prev) => ({ ...prev, [key]: value }));
-    setApplied((prev) => ({ ...prev, [key]: value }));
-  }
-
-  async function handleBulkAssign() {
-    if (selected.size === 0) return;
-    setAssigning(true);
-    setAssignError(null);
-    setAssignSuccess(null);
-    try {
-      const res = await fetch("/api/bookings/bulk-assign-guide", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ bookingIds: Array.from(selected), guideId: assignGuideId }),
-      });
-      const json = await res.json();
-      if (!res.ok) throw new Error(json.error ?? "Failed to assign guide");
-      const guideLabel = guides?.find((g) => g.id === assignGuideId)?.fullName ?? "guide";
-      setAssignSuccess(`Assigned ${guideLabel} to ${json.updatedCount} booking${json.updatedCount === 1 ? "" : "s"}.`);
-      setSelected(new Set());
-      setAssignGuideId("");
-      await load();
-    } catch (e) {
-      setAssignError(e instanceof Error ? e.message : "Failed to assign guide");
-    } finally {
-      setAssigning(false);
-    }
-  }
+  // Search across all bookings, regardless of which import they came from.
+  // Guest name and hotel name live on related models (Guest.fullName,
+  // Hotel.name); clientsNameRaw / hotelCity are the raw imported fallbacks
+  // kept on Booking itself for rows where the relation may not resolve to
+  // exactly what was in the sheet.
+  //
+  // Apply date filters to the persisted booking date fields.
+  const bookingResults = hasActiveFilter
+    ? await prisma.booking.findMany({
+        where: {
+          AND: [
+            hasQuery
+              ? {
+                  OR: [
+                    { guest: { fullName: { contains: q, mode: "insensitive" } } },
+                    { clientsNameRaw: { contains: q, mode: "insensitive" } },
+                    { hotel: { name: { contains: q, mode: "insensitive" } } },
+                    { hotelCity: { contains: q, mode: "insensitive" } },
+                    { confirmation: { contains: q, mode: "insensitive" } },
+                    { guideName: { contains: q, mode: "insensitive" } },
+                    { agent: { contains: q, mode: "insensitive" } },
+                  ],
+                }
+              : {},
+            checkInFrom || checkInTo
+              ? {
+                  checkInDate: {
+                    ...(checkInFrom ? { gte: checkInFrom } : {}),
+                    ...(checkInTo ? { lte: checkInTo } : {}),
+                  },
+                }
+              : {},
+            checkOutFrom || checkOutTo
+              ? {
+                  checkOutDate: {
+                    ...(checkOutFrom ? { gte: checkOutFrom } : {}),
+                    ...(checkOutTo ? { lte: checkOutTo } : {}),
+                  },
+                }
+              : {},
+          ],
+        },
+        include: {
+          guest: true,
+          hotel: true,
+        },
+        orderBy: { createdAt: "desc" },
+        take: 100,
+      })
+    : [];
 
   return (
-    <div className="mx-auto max-w-[1600px] space-y-4">
-      <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-xl font-semibold text-neutral-900 dark:text-neutral-100">Bookings</h1>
-          <p className="text-sm text-neutral-500">
-            {data ? `${data.total} booking${data.total === 1 ? "" : "s"}` : "Loading…"}
-            {activeFilterCount > 0 && (
-              <span className="ml-1.5 text-brand-600 dark:text-brand-400">
-                · {activeFilterCount} filter{activeFilterCount === 1 ? "" : "s"} active
-              </span>
-            )}
-          </p>
-        </div>
-        <button
-          onClick={load}
-          className="flex items-center gap-2 rounded-lg border border-neutral-300 px-3 py-1.5 text-sm font-medium text-neutral-700 hover:bg-neutral-50 dark:border-neutral-700 dark:text-neutral-300 dark:hover:bg-neutral-900"
-        >
-          {loading ? <Loader2 size={14} className="animate-spin" /> : <RefreshCw size={14} />}
-          Refresh
-        </button>
+    <div className="space-y-6">
+      <div>
+        <h1 className="text-xl font-semibold text-neutral-900 dark:text-neutral-100">Bookings</h1>
+        <p className="text-sm text-neutral-500">
+          {imports.length} import file{imports.length === 1 ? "" : "s"} · {totalBookings} booking
+          {totalBookings === 1 ? "" : "s"} total. Select a file to view its bookings.
+        </p>
       </div>
 
-      {/* ── Filters section ───────────────────────────────────────────── */}
-      <div className="rounded-xl border border-neutral-200 bg-white dark:border-neutral-800 dark:bg-neutral-950">
-        <button
-          onClick={() => setFiltersOpen((o) => !o)}
-          className="flex w-full items-center justify-between px-4 py-3"
-        >
-          <span className="flex items-center gap-2 text-sm font-semibold text-neutral-800 dark:text-neutral-200">
-            <SlidersHorizontal size={15} />
-            Filters
-            {activeFilterCount > 0 && (
-              <span className="rounded-full bg-brand-600 px-1.5 py-0.5 text-[10px] font-semibold text-white">
-                {activeFilterCount}
-              </span>
-            )}
+      {/* Search all bookings */}
+      <details
+        className="group rounded-xl border border-neutral-200 bg-white open:pb-4 dark:border-neutral-800 dark:bg-neutral-950"
+        open={hasActiveFilter}
+      >
+        <summary className="flex cursor-pointer list-none items-center justify-between px-4 py-3 text-sm font-medium text-neutral-700 dark:text-neutral-300">
+          <span className="flex items-center gap-2">
+            <Search size={16} />
+            Search all bookings
           </span>
-          {filtersOpen ? <ChevronUp size={16} className="text-neutral-400" /> : <ChevronDown size={16} className="text-neutral-400" />}
-        </button>
+          <span className="text-xs text-neutral-400 group-open:hidden">Expand</span>
+          <span className="hidden text-xs text-neutral-400 group-open:inline">Collapse</span>
+        </summary>
 
-        {filtersOpen && (
-          <div className="space-y-4 border-t border-neutral-200 px-4 py-4 dark:border-neutral-800">
-            {/* Row 1: search + status + meal plan */}
-            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
-              <FilterField label="Search">
-                <div className="relative">
-                  <Search size={14} className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-neutral-400" />
-                  <input
-                    value={draft.q}
-                    onChange={(e) => setDraft((p) => ({ ...p, q: e.target.value }))}
-                    placeholder="Guest, hotel, reference, samo ref, guide…"
-                    className={cn(inputCls, "w-full pl-8")}
-                  />
-                </div>
-              </FilterField>
-
-              <FilterField label="Status">
-                <select
-                  value={draft.status}
-                  onChange={(e) => updateAndApply("status", e.target.value as Filters["status"])}
-                  className={inputCls}
-                >
-                  {STATUS_OPTIONS.map((s) => (
-                    <option key={s} value={s}>
-                      {s === "ALL" ? "All statuses" : s}
-                    </option>
-                  ))}
-                </select>
-              </FilterField>
-
-              <FilterField label="Meal plan">
-                <select
-                  value={draft.mealPlan}
-                  onChange={(e) => updateAndApply("mealPlan", e.target.value as Filters["mealPlan"])}
-                  className={inputCls}
-                >
-                  {MEAL_PLAN_OPTIONS.map((m) => (
-                    <option key={m} value={m}>
-                      {m === "ALL" ? "All meal plans" : m}
-                    </option>
-                  ))}
-                </select>
-              </FilterField>
-
-              <FilterField label="Booking owner">
-                <input
-                  value={draft.bookingOwner}
-                  onChange={(e) => setDraft((p) => ({ ...p, bookingOwner: e.target.value }))}
-                  placeholder="e.g. Nadia"
-                  className={inputCls}
-                />
-              </FilterField>
+        <div className="border-t border-neutral-200 px-4 pt-4 dark:border-neutral-800">
+          <form className="flex flex-col gap-3" action="/bookings" method="GET">
+            <div className="relative">
+              <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-neutral-400" />
+              <input
+                type="text"
+                name="q"
+                defaultValue={q}
+                placeholder="Search by guest name, hotel, confirmation no, guide, or agent..."
+                className="w-full rounded-lg border border-neutral-300 bg-neutral-50 py-2 pl-9 pr-4 text-sm focus:border-brand-500 focus:outline-none focus:ring-1 focus:ring-brand-500 dark:border-neutral-700 dark:bg-neutral-900"
+              />
             </div>
 
-            {/* Row 2: date ranges */}
-            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
-              <FilterField label="Check-in from">
+            <div className="flex flex-wrap items-end gap-3">
+              <div className="flex flex-col gap-1">
+                <label htmlFor="checkInFrom" className="text-xs font-medium text-neutral-500 dark:text-neutral-400">
+                  Check-in from
+                </label>
                 <input
                   type="date"
-                  value={draft.checkInFrom}
-                  onChange={(e) => updateAndApply("checkInFrom", e.target.value)}
-                  className={inputCls}
+                  id="checkInFrom"
+                  name="checkInFrom"
+                  defaultValue={checkInFromRaw}
+                  className="rounded-lg border border-neutral-300 bg-neutral-50 px-3 py-2 text-sm focus:border-brand-500 focus:outline-none focus:ring-1 focus:ring-brand-500 dark:border-neutral-700 dark:bg-neutral-900"
                 />
-              </FilterField>
-              <FilterField label="Check-in to">
-                <input
-                  type="date"
-                  value={draft.checkInTo}
-                  onChange={(e) => updateAndApply("checkInTo", e.target.value)}
-                  className={inputCls}
-                />
-              </FilterField>
-              <FilterField label="Check-out from">
-                <input
-                  type="date"
-                  value={draft.checkOutFrom}
-                  onChange={(e) => updateAndApply("checkOutFrom", e.target.value)}
-                  className={inputCls}
-                />
-              </FilterField>
-              <FilterField label="Check-out to">
-                <input
-                  type="date"
-                  value={draft.checkOutTo}
-                  onChange={(e) => updateAndApply("checkOutTo", e.target.value)}
-                  className={inputCls}
-                />
-              </FilterField>
-            </div>
-
-            {/* Row 3: text filters + pax range */}
-            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
-              <FilterField label="Agent">
-                <input
-                  value={draft.agent}
-                  onChange={(e) => setDraft((p) => ({ ...p, agent: e.target.value }))}
-                  placeholder="Agent name"
-                  className={inputCls}
-                />
-              </FilterField>
-              <FilterField label="Hotel">
-                <input
-                  value={draft.hotel}
-                  onChange={(e) => setDraft((p) => ({ ...p, hotel: e.target.value }))}
-                  placeholder="Hotel name"
-                  className={inputCls}
-                />
-              </FilterField>
-              <FilterField label="Guide">
-                <input
-                  value={draft.guide}
-                  onChange={(e) => setDraft((p) => ({ ...p, guide: e.target.value }))}
-                  placeholder="Guide name"
-                  className={inputCls}
-                />
-              </FilterField>
-              <FilterField label="PAX range">
-                <div className="flex items-center gap-2">
-                  <input
-                    type="number"
-                    min={0}
-                    value={draft.minPax}
-                    onChange={(e) => setDraft((p) => ({ ...p, minPax: e.target.value }))}
-                    placeholder="Min"
-                    className={cn(inputCls, "w-full")}
-                  />
-                  <span className="text-neutral-400">–</span>
-                  <input
-                    type="number"
-                    min={0}
-                    value={draft.maxPax}
-                    onChange={(e) => setDraft((p) => ({ ...p, maxPax: e.target.value }))}
-                    placeholder="Max"
-                    className={cn(inputCls, "w-full")}
-                  />
-                </div>
-              </FilterField>
-            </div>
-
-            <div className="flex items-center justify-end gap-2 pt-1">
-              <button
-                onClick={resetFilters}
-                className="flex items-center gap-1.5 rounded-lg border border-neutral-300 px-3 py-1.5 text-xs font-medium text-neutral-600 hover:bg-neutral-50 dark:border-neutral-700 dark:text-neutral-300 dark:hover:bg-neutral-900"
-              >
-                <RotateCcw size={12} /> Reset all
-              </button>
-              <button
-                onClick={applyFilters}
-                className="rounded-lg bg-brand-600 px-4 py-1.5 text-xs font-medium text-white hover:bg-brand-700"
-              >
-                Apply filters
-              </button>
-            </div>
-          </div>
-        )}
-      </div>
-
-      {/* Bulk assign bar — only shown once something is ticked */}
-      {selected.size > 0 && (
-        <div className="flex flex-wrap items-center gap-3 rounded-xl border border-brand-200 bg-brand-50 px-4 py-3 dark:border-brand-900 dark:bg-brand-900/20">
-          <span className="flex items-center gap-1.5 text-sm font-medium text-brand-800 dark:text-brand-200">
-            <UserCheck size={16} />
-            {selected.size} selected
-          </span>
-
-          {loadingGuides ? (
-            <Loader2 size={16} className="animate-spin text-brand-700 dark:text-brand-300" />
-          ) : (
-            <select
-              value={assignGuideId}
-              onChange={(e) => setAssignGuideId(e.target.value)}
-              className="rounded-lg border border-neutral-300 px-3 py-1.5 text-sm dark:border-neutral-700 dark:bg-neutral-900"
-            >
-              <option value="">— Unassigned —</option>
-              {guides?.map((g) => (
-                <option key={g.id} value={g.id}>
-                  {g.fullName}
-                  {g.specialization ? ` (${g.specialization})` : ""}
-                </option>
-              ))}
-            </select>
-          )}
-
-          <button
-            onClick={handleBulkAssign}
-            disabled={assigning}
-            className="flex items-center gap-2 rounded-lg bg-brand-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-brand-700 disabled:opacity-60"
-          >
-            {assigning && <Loader2 size={14} className="animate-spin" />}
-            Assign to {selected.size} booking{selected.size === 1 ? "" : "s"}
-          </button>
-
-          <button
-            onClick={clearSelection}
-            className="flex items-center gap-1 text-sm font-medium text-neutral-500 hover:text-neutral-800 dark:hover:text-neutral-200"
-          >
-            <X size={14} /> Clear
-          </button>
-        </div>
-      )}
-
-      {assignError && (
-        <p className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700 dark:border-red-900 dark:bg-red-900/20 dark:text-red-300">
-          {assignError}
-        </p>
-      )}
-      {assignSuccess && (
-        <p className="rounded-lg border border-green-200 bg-green-50 px-4 py-3 text-sm text-green-700 dark:border-green-900 dark:bg-green-900/20 dark:text-green-300">
-          {assignSuccess}
-        </p>
-      )}
-
-      {error && (
-        <p className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700 dark:border-red-900 dark:bg-red-900/20 dark:text-red-300">
-          {error}
-        </p>
-      )}
-
-      {/* ── Dense, excel-style table ─────────────────────────────────── */}
-      <div className="overflow-hidden rounded-xl border border-neutral-200 bg-white dark:border-neutral-800 dark:bg-neutral-950">
-        <div className="overflow-x-auto">
-          <table className="w-full border-collapse text-left text-[11px] leading-tight">
-            <thead className="sticky top-0 z-10">
-              <tr className="border-b border-neutral-200 bg-neutral-50 uppercase tracking-wide text-neutral-500 dark:border-neutral-800 dark:bg-neutral-900">
-                <th className="w-8 whitespace-nowrap border-r border-neutral-200 px-2 py-2 dark:border-neutral-800">
-                  <input
-                    type="checkbox"
-                    checked={allOnPageSelected}
-                    onChange={toggleAllOnPage}
-                    disabled={!data || data.bookings.length === 0}
-                    className="h-3.5 w-3.5 rounded border-neutral-300 dark:border-neutral-700"
-                  />
-                </th>
-                <th className="whitespace-nowrap border-r border-neutral-200 px-2 py-2 font-semibold dark:border-neutral-800">Reference</th>
-                <th className="whitespace-nowrap border-r border-neutral-200 px-2 py-2 font-semibold dark:border-neutral-800">Guest</th>
-                <th className="whitespace-nowrap border-r border-neutral-200 px-2 py-2 font-semibold dark:border-neutral-800">Hotel</th>
-                <th className="whitespace-nowrap border-r border-neutral-200 px-2 py-2 font-semibold dark:border-neutral-800">City</th>
-                <th className="whitespace-nowrap border-r border-neutral-200 px-2 py-2 font-semibold dark:border-neutral-800">Check-in</th>
-                <th className="whitespace-nowrap border-r border-neutral-200 px-2 py-2 font-semibold dark:border-neutral-800">Check-out</th>
-                <th className="whitespace-nowrap border-r border-neutral-200 px-2 py-2 font-semibold dark:border-neutral-800">PAX</th>
-                <th className="whitespace-nowrap border-r border-neutral-200 px-2 py-2 font-semibold dark:border-neutral-800">Rooms</th>
-                <th className="whitespace-nowrap border-r border-neutral-200 px-2 py-2 font-semibold dark:border-neutral-800">Meal</th>
-                <th className="whitespace-nowrap border-r border-neutral-200 px-2 py-2 font-semibold dark:border-neutral-800">Agent</th>
-                <th className="whitespace-nowrap border-r border-neutral-200 px-2 py-2 font-semibold dark:border-neutral-800">Samo ref</th>
-                <th className="whitespace-nowrap border-r border-neutral-200 px-2 py-2 font-semibold dark:border-neutral-800">Res no</th>
-                <th className="whitespace-nowrap border-r border-neutral-200 px-2 py-2 font-semibold dark:border-neutral-800">Arrival flight</th>
-                <th className="whitespace-nowrap border-r border-neutral-200 px-2 py-2 font-semibold dark:border-neutral-800">Departure flight</th>
-                <th className="whitespace-nowrap border-r border-neutral-200 px-2 py-2 font-semibold dark:border-neutral-800">Guide</th>
-                <th className="whitespace-nowrap border-r border-neutral-200 px-2 py-2 font-semibold dark:border-neutral-800">Owner</th>
-                <th className="whitespace-nowrap border-r border-neutral-200 px-2 py-2 font-semibold dark:border-neutral-800">Status</th>
-                <th className="whitespace-nowrap px-2 py-2 font-semibold"></th>
-              </tr>
-            </thead>
-            <tbody>
-              {loading && !data && (
-                <tr>
-                  <td colSpan={19} className="px-4 py-10 text-center text-neutral-500">
-                    <Loader2 size={18} className="mx-auto animate-spin" />
-                  </td>
-                </tr>
-              )}
-
-              {data && data.bookings.length === 0 && (
-                <tr>
-                  <td colSpan={19} className="px-4 py-10 text-center text-neutral-500">
-                    No bookings match this search.
-                  </td>
-                </tr>
-              )}
-
-              {data?.bookings.map((b, i) => (
-                <tr
-                  key={b.id}
-                  className={cn(
-                    "border-b border-neutral-100 hover:bg-brand-50/50 dark:border-neutral-900 dark:hover:bg-neutral-900",
-                    i % 2 === 1 && "bg-neutral-50/60 dark:bg-neutral-900/30",
-                    selected.has(b.id) && "!bg-brand-50 dark:!bg-brand-900/20"
-                  )}
-                >
-                  <td className="border-r border-neutral-100 px-2 py-1.5 dark:border-neutral-900">
-                    <input
-                      type="checkbox"
-                      checked={selected.has(b.id)}
-                      onChange={() => toggleRow(b.id)}
-                      className="h-3.5 w-3.5 rounded border-neutral-300 dark:border-neutral-700"
-                    />
-                  </td>
-                  <td className="whitespace-nowrap border-r border-neutral-100 px-2 py-1.5 font-medium text-neutral-800 dark:border-neutral-900 dark:text-neutral-200">
-                    <Link href={`/bookings/${b.id}`} className="hover:underline">
-                      {b.bookingReference}
-                    </Link>
-                  </td>
-                  <td className="whitespace-nowrap border-r border-neutral-100 px-2 py-1.5 text-neutral-700 dark:border-neutral-900 dark:text-neutral-300">
-                    {b.guest?.fullName ?? b.clientsNameRaw ?? "—"}
-                  </td>
-                  <td className="whitespace-nowrap border-r border-neutral-100 px-2 py-1.5 text-neutral-700 dark:border-neutral-900 dark:text-neutral-300">
-                    {b.hotel?.name ?? "—"}
-                  </td>
-                  <td className="whitespace-nowrap border-r border-neutral-100 px-2 py-1.5 text-neutral-700 dark:border-neutral-900 dark:text-neutral-300">
-                    {b.hotel?.city ?? "—"}
-                  </td>
-                  <td className="whitespace-nowrap border-r border-neutral-100 px-2 py-1.5 text-neutral-700 dark:border-neutral-900 dark:text-neutral-300">
-                    {formatDate(b.checkInDate)}
-                  </td>
-                  <td className="whitespace-nowrap border-r border-neutral-100 px-2 py-1.5 text-neutral-700 dark:border-neutral-900 dark:text-neutral-300">
-                    {formatDate(b.checkOutDate)}
-                  </td>
-                  <td className="whitespace-nowrap border-r border-neutral-100 px-2 py-1.5 text-neutral-700 dark:border-neutral-900 dark:text-neutral-300">
-                    {b.numberOfGuests ?? "—"}
-                  </td>
-                  <td className="whitespace-nowrap border-r border-neutral-100 px-2 py-1.5 text-neutral-700 dark:border-neutral-900 dark:text-neutral-300">
-                    {b.numberOfRooms ?? "—"}
-                  </td>
-                  <td className="whitespace-nowrap border-r border-neutral-100 px-2 py-1.5 text-neutral-700 dark:border-neutral-900 dark:text-neutral-300">
-                    {b.mealPlan ?? "—"}
-                  </td>
-                  <td className="whitespace-nowrap border-r border-neutral-100 px-2 py-1.5 text-neutral-700 dark:border-neutral-900 dark:text-neutral-300">
-                    {b.agent ?? "—"}
-                  </td>
-                  <td className="whitespace-nowrap border-r border-neutral-100 px-2 py-1.5 text-neutral-700 dark:border-neutral-900 dark:text-neutral-300">
-                    {b.samoRef ?? "—"}
-                  </td>
-                  <td className="whitespace-nowrap border-r border-neutral-100 px-2 py-1.5 text-neutral-700 dark:border-neutral-900 dark:text-neutral-300">
-                    {b.resNo ?? "—"}
-                  </td>
-                  <td className="whitespace-nowrap border-r border-neutral-100 px-2 py-1.5 text-neutral-700 dark:border-neutral-900 dark:text-neutral-300">
-                    {b.arrivalFlight ?? "—"}
-                  </td>
-                  <td className="whitespace-nowrap border-r border-neutral-100 px-2 py-1.5 text-neutral-700 dark:border-neutral-900 dark:text-neutral-300">
-                    {b.departureFlight ?? "—"}
-                  </td>
-                  <td className="whitespace-nowrap border-r border-neutral-100 px-2 py-1.5 text-neutral-700 dark:border-neutral-900 dark:text-neutral-300">
-                    {b.guide?.fullName ?? b.guideName ?? "—"}
-                  </td>
-                  <td className="whitespace-nowrap border-r border-neutral-100 px-2 py-1.5 text-neutral-700 dark:border-neutral-900 dark:text-neutral-300">
-                    {b.bookingOwner ?? "—"}
-                  </td>
-                  <td className="whitespace-nowrap border-r border-neutral-100 px-2 py-1.5 dark:border-neutral-900">
-                    <StatusBadge status={b.status} />
-                  </td>
-                  <td className="whitespace-nowrap px-2 py-1.5 text-right">
-                    <Link
-                      href={`/bookings/${b.id}`}
-                      className="inline-flex items-center gap-1 rounded border border-neutral-300 px-1.5 py-0.5 text-[10px] font-medium text-neutral-600 hover:bg-neutral-100 dark:border-neutral-700 dark:text-neutral-300 dark:hover:bg-neutral-800"
-                    >
-                      <QrCode size={10} /> View
-                    </Link>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      </div>
-
-      {data && (
-        <div className="flex flex-wrap items-center justify-between gap-3 text-sm text-neutral-600 dark:text-neutral-400">
-          <div className="flex items-center gap-2">
-            <span>Rows per page</span>
-            <select
-              value={pageSize}
-              onChange={(e) => setPageSize(Number(e.target.value) as (typeof PAGE_SIZE_OPTIONS)[number])}
-              className="rounded-lg border border-neutral-300 px-2 py-1 text-xs dark:border-neutral-700 dark:bg-neutral-900"
-            >
-              {PAGE_SIZE_OPTIONS.map((n) => (
-                <option key={n} value={n}>
-                  {n}
-                </option>
-              ))}
-            </select>
-          </div>
-
-          {data.totalPages > 1 && (
-            <div className="flex items-center gap-3">
-              <span>
-                Page {data.page} of {data.totalPages}
-              </span>
-              <div className="flex gap-2">
-                <button
-                  onClick={() => setPage((p) => Math.max(1, p - 1))}
-                  disabled={page <= 1}
-                  className="flex items-center gap-1 rounded-lg border border-neutral-300 px-3 py-1.5 disabled:opacity-40 dark:border-neutral-700"
-                >
-                  <ChevronLeft size={14} /> Prev
-                </button>
-                <button
-                  onClick={() => setPage((p) => Math.min(data.totalPages, p + 1))}
-                  disabled={page >= data.totalPages}
-                  className="flex items-center gap-1 rounded-lg border border-neutral-300 px-3 py-1.5 disabled:opacity-40 dark:border-neutral-700"
-                >
-                  Next <ChevronRight size={14} />
-                </button>
               </div>
+              <div className="flex flex-col gap-1">
+                <label htmlFor="checkInTo" className="text-xs font-medium text-neutral-500 dark:text-neutral-400">
+                  Check-in to
+                </label>
+                <input
+                  type="date"
+                  id="checkInTo"
+                  name="checkInTo"
+                  defaultValue={checkInToRaw}
+                  className="rounded-lg border border-neutral-300 bg-neutral-50 px-3 py-2 text-sm focus:border-brand-500 focus:outline-none focus:ring-1 focus:ring-brand-500 dark:border-neutral-700 dark:bg-neutral-900"
+                />
+              </div>
+              <div className="flex flex-col gap-1">
+                <label htmlFor="checkOutFrom" className="text-xs font-medium text-neutral-500 dark:text-neutral-400">
+                  Check-out from
+                </label>
+                <input
+                  type="date"
+                  id="checkOutFrom"
+                  name="checkOutFrom"
+                  defaultValue={checkOutFromRaw}
+                  className="rounded-lg border border-neutral-300 bg-neutral-50 px-3 py-2 text-sm focus:border-brand-500 focus:outline-none focus:ring-1 focus:ring-brand-500 dark:border-neutral-700 dark:bg-neutral-900"
+                />
+              </div>
+              <div className="flex flex-col gap-1">
+                <label htmlFor="checkOutTo" className="text-xs font-medium text-neutral-500 dark:text-neutral-400">
+                  Check-out to
+                </label>
+                <input
+                  type="date"
+                  id="checkOutTo"
+                  name="checkOutTo"
+                  defaultValue={checkOutToRaw}
+                  className="rounded-lg border border-neutral-300 bg-neutral-50 px-3 py-2 text-sm focus:border-brand-500 focus:outline-none focus:ring-1 focus:ring-brand-500 dark:border-neutral-700 dark:bg-neutral-900"
+                />
+              </div>
+
+              <button
+                type="submit"
+                className="rounded-lg bg-brand-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-brand-700"
+              >
+                Search
+              </button>
+              {hasActiveFilter && (
+                <Link
+                  href="/bookings"
+                  className="flex items-center justify-center gap-1 rounded-lg border border-neutral-300 px-3 py-2 text-sm text-neutral-600 transition-colors hover:bg-neutral-100 dark:border-neutral-700 dark:text-neutral-400 dark:hover:bg-neutral-800"
+                >
+                  <X size={16} />
+                  Clear
+                </Link>
+              )}
+            </div>
+          </form>
+
+          {hasActiveFilter && (
+            <div className="mt-4 overflow-x-auto rounded-lg border border-neutral-200 dark:border-neutral-800">
+              <table className="w-full text-left text-sm">
+                <thead>
+                  <tr className="border-b border-neutral-200 text-xs uppercase tracking-wide text-neutral-500 dark:border-neutral-800">
+                    <th className="px-4 py-3 font-medium">Guest</th>
+                    <th className="px-4 py-3 font-medium">Hotel</th>
+                    <th className="px-4 py-3 font-medium">Confirmation</th>
+                    <th className="px-4 py-3 font-medium">Check-in</th>
+                    <th className="px-4 py-3 font-medium">Check-out</th>
+                    <th className="px-4 py-3 font-medium">Guide</th>
+                    <th className="px-4 py-3 font-medium">Agent</th>
+                    <th className="px-4 py-3 font-medium">Actions</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {bookingResults.length === 0 && (
+                    <tr>
+                      <td colSpan={8} className="px-4 py-8 text-center text-neutral-500">
+                        No bookings match the selected filters{q ? ` for "${q}"` : ""}.
+                      </td>
+                    </tr>
+                  )}
+                  {bookingResults.map((b) => (
+                    <tr key={b.id} className="border-b border-neutral-100 last:border-0 dark:border-neutral-900">
+                      <td className="px-4 py-3 text-neutral-700 dark:text-neutral-300">
+                        {b.guest?.fullName || b.clientsNameRaw || "—"}
+                      </td>
+                      <td className="px-4 py-3 text-neutral-600 dark:text-neutral-400">
+                        {b.hotel?.name || b.hotelCity || "—"}
+                      </td>
+                      <td className="px-4 py-3 text-neutral-600 dark:text-neutral-400">{b.confirmation || "—"}</td>
+                      <td className="px-4 py-3 text-neutral-600 dark:text-neutral-400">
+                        {b.checkInDate ? new Date(b.checkInDate).toLocaleDateString() : "—"}
+                      </td>
+                      <td className="px-4 py-3 text-neutral-600 dark:text-neutral-400">
+                        {b.checkOutDate ? new Date(b.checkOutDate).toLocaleDateString() : "—"}
+                      </td>
+                      <td className="px-4 py-3 text-neutral-600 dark:text-neutral-400">{b.guideName || "—"}</td>
+                      <td className="px-4 py-3 text-neutral-600 dark:text-neutral-400">{b.agent || "—"}</td>
+                      <td className="px-4 py-3">
+                        <Link
+                          href={`/bookings/${b.id}`}
+                          className="inline-flex items-center gap-1.5 rounded-lg border border-neutral-300 px-3 py-1.5 text-xs font-medium text-neutral-700 transition-colors hover:bg-neutral-50 dark:border-neutral-700 dark:text-neutral-300 dark:hover:bg-neutral-900"
+                        >
+                          <Eye size={14} /> View full detail
+                        </Link>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
             </div>
           )}
         </div>
-      )}
+      </details>
+
+      {/* Table */}
+      <div className="overflow-x-auto rounded-xl border border-neutral-200 bg-white dark:border-neutral-800 dark:bg-neutral-950">
+        <table className="w-full text-left text-sm">
+          <thead>
+            <tr className="border-b border-neutral-200 text-xs uppercase tracking-wide text-neutral-500 dark:border-neutral-800">
+              <th className="px-4 py-3 font-medium">File</th>
+              <th className="px-4 py-3 font-medium">Uploaded by</th>
+              <th className="px-4 py-3 font-medium">Date</th>
+              <th className="px-4 py-3 font-medium">Rows</th>
+              <th className="px-4 py-3 font-medium">Bookings</th>
+              <th className="px-4 py-3 font-medium">Status</th>
+            </tr>
+          </thead>
+          <tbody>
+            {imports.length === 0 && (
+              <tr>
+                <td colSpan={6} className="px-4 py-8 text-center text-neutral-500">
+                  No booking imports yet — run one from Excel Import.
+                </td>
+              </tr>
+            )}
+            {imports.map((imp) => {
+              const meta = STATUS_META[imp.status] ?? STATUS_META.PENDING;
+              const Icon = meta.icon;
+              return (
+                <tr key={imp.id} className="border-b border-neutral-100 last:border-0 dark:border-neutral-900">
+                  <td className="px-4 py-3">
+                    <Link
+                      href={`/bookings/imports/${imp.id}`}
+                      className="flex items-center gap-2 font-medium text-brand-700 hover:underline dark:text-brand-400"
+                    >
+                      <FileSpreadsheet size={14} className="flex-shrink-0" />
+                      {imp.fileName}
+                    </Link>
+                    <p className="text-xs text-neutral-500">{imp.worksheetName}</p>
+                  </td>
+                  <td className="px-4 py-3 text-neutral-600 dark:text-neutral-400">{imp.uploadedBy.name}</td>
+                  <td className="px-4 py-3 text-neutral-600 dark:text-neutral-400">
+                    {imp.createdAt.toLocaleString()}
+                  </td>
+                  <td className="px-4 py-3 text-neutral-600 dark:text-neutral-400">
+                    {imp.successRows}/{imp.totalRows}
+                    {imp.duplicateRows > 0 && <span className="text-amber-600"> · {imp.duplicateRows} dup</span>}
+                    {imp.failedRows > 0 && <span className="text-red-600"> · {imp.failedRows} failed</span>}
+                  </td>
+                  <td className="px-4 py-3 text-neutral-600 dark:text-neutral-400">{imp._count.bookings}</td>
+                  <td className="px-4 py-3">
+                    <span className={`flex items-center gap-1.5 ${meta.className}`}>
+                      <Icon size={14} /> {meta.label}
+                    </span>
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
     </div>
   );
 }
