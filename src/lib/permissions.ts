@@ -9,7 +9,27 @@ export type PermissionAction = "canView" | "canCreate" | "canEdit" | "canDelete"
 export async function getCurrentUser() {
   const session = await getServerSession(authOptions);
   if (!session?.user) return null;
-  return session.user as { id: string; name: string; email: string; username: string; role: string };
+
+  const sessionUser = session.user as { id?: string; email?: string | null };
+  const selectUser = { id: true, name: true, email: true, username: true, role: { select: { name: true } }, status: true } as const;
+
+  const user = sessionUser.id
+    ? await prisma.user.findUnique({ where: { id: sessionUser.id }, select: selectUser })
+    : null;
+  const recoveredUser =
+    user || !sessionUser.email
+      ? user
+      : await prisma.user.findUnique({ where: { email: sessionUser.email }, select: selectUser });
+
+  if (!recoveredUser || recoveredUser.status !== "ACTIVE") return null;
+
+  return {
+    id: recoveredUser.id,
+    name: recoveredUser.name,
+    email: recoveredUser.email,
+    username: recoveredUser.username,
+    role: recoveredUser.role.name,
+  };
 }
 
 /** Server-side guard: throws if the current user lacks the given permission on a module. */
